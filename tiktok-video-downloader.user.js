@@ -1,14 +1,18 @@
 // ==UserScript==
 // @name         TikTok Video/Audio Downloader - Fetch Highest Quality Video/Audio
 // @namespace    none
-// @version      1.3
+// @version      1.4
 // @description  Saves locally. One click downloads the TikTok video/audio, highest quality, no watermark
 // @author       deadnme
 // @license      GNU GPLv3
 // @icon         https://www.tiktok.com/favicon.ico
 // @match        *://*.tiktok.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      tiktokcdn.com
+// @connect      tiktok.com
+// @sandbox      JavaScript
+// @inject-into  page
 // @downloadURL https://update.greasyfork.org/scripts/596966/TikTok%20VideoAudio%20Downloader%20-%20Fetch%20Highest%20Quality%20VideoAudio.user.js
 // @updateURL https://update.greasyfork.org/scripts/596966/TikTok%20VideoAudio%20Downloader%20-%20Fetch%20Highest%20Quality%20VideoAudio.meta.js
 // ==/UserScript==
@@ -36,9 +40,12 @@
     // video on screen in that cache and downloads it straight away --
     // no extra tab, nothing to paste, no 403.
     //
-    // @grant none is deliberate: the script runs in the page itself,
-    // so it can hook the page's own fetch (a userscript sandbox can't,
-    // and TikTok's CSP blocks injecting a <script> to get there).
+    // The script must run in the page itself so it can hook the page's
+    // own fetch (a userscript sandbox can't, and TikTok's CSP blocks
+    // injecting a <script> to get there). The one grant,
+    // GM_xmlhttpRequest, is only a fallback for CDN hosts that send no
+    // CORS headers; Violentmonkey still injects into the page with it,
+    // and @sandbox JavaScript asks Tampermonkey for the same.
     // ---------------------------------------------------------------
 
     const VIDEO_ID_PATTERN = /\/video\/(\d+)/;
@@ -78,9 +85,8 @@
         }
     };
 
-    // With @grant none we already run in the page. If a grant ever gets
-    // added (which sandboxes the script), unsafeWindow is the way back
-    // to the page's own fetch -- hooking the sandbox's copy sees nothing.
+    // With a grant, `window` may be the manager's wrapper; unsafeWindow
+    // is the page's real window, whose fetch TikTok actually calls.
     const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
     const originalFetch = W.fetch;
@@ -166,7 +172,7 @@
     };
 
     // ---------------------------------------------------------------
-    // Download -- plain fetch + a blob link, no extension APIs needed
+    // Download -- page fetch (GM_xmlhttpRequest fallback) + a blob link
     // ---------------------------------------------------------------
 
     const save = (blob, name) => {
@@ -180,6 +186,27 @@
         setTimeout(() => URL.revokeObjectURL(href), 60000);
     };
 
+    // A third host (v**.tiktokcdn.com, where an original sound's audio
+    // lives) sends no CORS headers at all, so the page can't read it
+    // either way. The extension's own request isn't bound by CORS.
+    const gmFetch = (url) => new Promise((resolve) => {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            resolve(null);
+            return;
+        }
+        GM_xmlhttpRequest({
+            url,
+            responseType: 'blob',
+            headers: { Referer: 'https://www.tiktok.com/' },
+            onload: (r) => {
+                log('GM HTTP', r.status, url);
+                resolve(r.status >= 200 && r.status < 300 ? r.response : null);
+            },
+            onerror: () => resolve(null),
+            ontimeout: () => resolve(null),
+        });
+    });
+
     // The two CDNs disagree about cookies: the video one 403s without
     // them, the music one sends "Allow-Origin: *" and so refuses any
     // credentialed request outright. Try both ways rather than guess.
@@ -188,15 +215,22 @@
             for (const credentials of ['include', 'omit']) {
                 try {
                     const res = await fetch(url, { credentials });
-                    if (res.ok) return res;
+                    if (res.ok) return await res.blob();
                     log('HTTP', res.status, `(credentials: ${credentials})`, url);
                 } catch (e) {
                     log('Blocked', `(credentials: ${credentials})`, e.message);
                 }
             }
+            const blob = await gmFetch(url);
+            if (blob) return blob;
         }
         return null;
     };
+
+    // An original sound is usually AAC in an mp4 box, not an mp3. The
+    // CDN's Content-Type can be generic, so also check for the mp4
+    // "ftyp" marker at byte 4.
+    const extensionFor = (kind, type, head) => (kind === 'mp3' && (head === 'ftyp' || /mp4|m4a|aac/i.test(type || '')) ? 'm4a' : kind);
 
     // ponytail: mp3 = the item's sound file, no transcoding. For an
     // original sound that IS the video's audio; for a borrowed sound
@@ -212,14 +246,14 @@
             toast(kind === 'mp3' ? 'No sound file on that video.' : 'No downloadable URL for that video.');
             return;
         }
-        const name = `tiktok_${item.author?.uniqueId || 'video'}_${item.id}.${kind}`;
         toast(`Downloading ${kind.toUpperCase()} ${item.author?.uniqueId ? '@' + item.author.uniqueId : item.id}…`);
-        const res = await fetchFirst(sources);
-        if (!res) {
+        const blob = await fetchFirst(sources);
+        if (!blob) {
             toast('Download failed - every URL refused. See console.');
             return;
         }
-        const blob = await res.blob();
+        const head = await blob.slice(4, 8).text();
+        const name = `tiktok_${item.author?.uniqueId || 'video'}_${item.id}.${extensionFor(kind, blob.type, head)}`;
         save(blob, name);
         log('Saved', name, blob.size, 'bytes');
         toast(`Saved ${name}`);
@@ -418,6 +452,10 @@
         ok(sourcesFor(withSound, 'mp3')[0] === 'a.mp3', 'mp3 comes from the sound file');
         ok(sourcesFor(withSound, 'mp4')[0] === 'v.mp4', 'mp4 comes from the video');
         ok(sourcesFor({ video: { playAddr: 'v.mp4' } }, 'mp3').length === 0, 'no sound file means nothing to try');
+        ok(extensionFor('mp3', 'audio/mpeg') === 'mp3', 'real mp3 keeps .mp3');
+        ok(extensionFor('mp3', 'audio/mp4') === 'm4a', 'AAC audio saves as .m4a');
+        ok(extensionFor('mp4', 'video/mp4') === 'mp4', 'video stays .mp4');
+        ok(extensionFor('mp3', 'application/octet-stream', 'ftyp') === 'm4a', 'generic type but mp4 bytes saves as .m4a');
 
         const before = items.size;
         harvest({ some: { nest: [{ id: ID, video: { bitrateInfo: [hd] } }, { id: 'x', notAVideo: 1 }] } });

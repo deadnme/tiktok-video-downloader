@@ -4,7 +4,7 @@
 Posted just in case somebody else wants it. Personal project.
 
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Greasy Fork](https://img.shields.io/badge/greasyfork-v1.3-red.svg)](https://greasyfork.org/en/scripts/596966)
+[![Greasy Fork](https://img.shields.io/badge/greasyfork-v1.4-red.svg)](https://greasyfork.org/en/scripts/596966)
 
 
 ---
@@ -68,7 +68,7 @@ Visit [tiktok.com](https://www.tiktok.com/) or hard-refresh your browser (ctrl +
 2. Click the download button in the bottom-right corner.
 3. Choose **MP4 · video** or **MP3 · audio**.
 
-The file saves as `tiktok_<username>_<video id>.mp4` (or `.mp3`).
+The file saves as `tiktok_<username>_<video id>.mp4` (audio saves as `.mp3`, or `.m4a` when the sound is AAC).
 
 No configuration is needed. The script:
 
@@ -91,6 +91,12 @@ No configuration is needed. The script:
 ---
 
 ## Changelog
+
+### 1.4
+
+- Fixed MP3 · audio failing on videos with an original sound. That audio sits on a TikTok CDN host that sends no CORS headers, so the page could not read it. The script now falls back to `GM_xmlhttpRequest` for that host (new `@grant` and `@connect` lines).
+- Audio that is really AAC now saves as `.m4a` instead of a misnamed `.mp3`.
+- Tested on Violentmonkey. Tampermonkey is not yet tested with the new grant.
 
 ### 1.3
 
